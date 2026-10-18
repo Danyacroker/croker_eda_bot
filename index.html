@@ -274,11 +274,11 @@ products: [
   ['fil','филе курицы','meat','г'],['drm','голень курицы','meat','г'],['bef','говяжья вырезка','meat','г'],
   ['prk','свиная вырезка','meat','г'],['sau','сосиски','meat','шт'],['ham','ветчина','meat','г'],['bac','бекон','meat','г'],
   ['chs','сыр','dairy','г'],['smt','сметана','dairy','г'],['btr','сливочное масло','dairy','г'],
-  ['mlk','молоко','dairy','мл'],['egg','яйца','dairy','шт'],['tvr','творожок','dairy','шт'],
+  ['mlk','молоко','dairy','мл'],['egg','яйца','eggs','шт'],['tvr','творожок','dairy','шт'],
   ['crm','сливки','dairy','мл'],['srt','сиртаки','dairy','г'],['prm','пармезан','dairy','г'],
   ['buk','гречка','groc','г'],['mac','макароны','groc','г'],['ric','рис','groc','г'],['oat','овсянка','groc','г'],
   ['udn','лапша удон','groc','г'],['nch','начос','groc','г'],['crt','сухарики','groc','г'],
-  ['prt','протеин','groc','г'],['cof','кофе','groc','г'],['hon','мёд','groc','г'],
+  ['prt','протеин','groc','г'],['cof','кофе','groc','г'],['hon','мёд','sweet','г'],
   ['bbn','булочки для бургера','bread','шт'],['hbn','булочки для хот-дога','bread','шт'],['lav','лаваш','bread','шт'],
   ['rot','лепёшки ротти','bread','шт'],['dou','тесто для пиццы','bread','г'],['bre','хлеб','bread','шт'],
   ['pkl','корнишоны','cans','г'],['jal','халапеньо','cans','г'],['may','майонез','cans','г'],
@@ -346,13 +346,35 @@ function haptic(t) {
 /* ================= Справочники ================= */
 const MEALS = { b: 'Завтрак', l: 'Обед', d: 'Ужин', s: 'Перекус' };
 const MEAL_KEYS = ['b', 'l', 'd', 's'];
+/* Отделы магазина. Порядок здесь — порядок по умолчанию; его можно поменять в настройках. */
 const CATS = {
-  veg: { n: 'Овощи, фрукты, зелень', c: '#3fa35b' }, meat: { n: 'Мясо и птица', c: '#d9534f' },
-  dairy: { n: 'Молочное и яйца', c: '#4a8fe0' }, groc: { n: 'Крупы и бакалея', c: '#d4a017' },
-  bread: { n: 'Хлеб и лепёшки', c: '#b07a4a' }, cans: { n: 'Соусы и консервы', c: '#e07b2e' },
-  frozen: { n: 'Заморозка', c: '#3bb3c3' }, other: { n: 'Прочее', c: '#8e8e93' }
+  eggs: { n: 'Яйца', c: '#e9b949' },
+  dairy: { n: 'Молочное', c: '#4a8fe0' },
+  meat: { n: 'Мясо и птица', c: '#d9534f' },
+  fish: { n: 'Рыба и морепродукты', c: '#2d7fb5' },
+  veg: { n: 'Овощи, фрукты, зелень', c: '#3fa35b' },
+  groc: { n: 'Крупы, макароны, бакалея', c: '#cf9a12' },
+  cans: { n: 'Соусы и консервы', c: '#e07b2e' },
+  spice: { n: 'Специи и приправы', c: '#b4532a' },
+  nuts: { n: 'Орехи и сухофрукты', c: '#8d6e63' },
+  sweet: { n: 'Сладкое', c: '#d65db1' },
+  bread: { n: 'Хлеб и выпечка', c: '#b07a4a' },
+  frozen: { n: 'Заморозка', c: '#3bb3c3' },
+  drinks: { n: 'Напитки', c: '#6c7ae0' },
+  home: { n: 'Для дома', c: '#7f8c8d' },
+  other: { n: 'Прочее', c: '#8e8e93' }
 };
-const CAT_KEYS = Object.keys(CATS);
+const catOf = k => CATS[k] || CATS.other;
+let _catSrc, _catOrder;
+function catKeys() {
+  const src = S && S.settings && S.settings.catOrder;
+  if (_catOrder && src === _catSrc) return _catOrder;
+  const order = Array.isArray(src) ? src.filter((k, i) => CATS[k] && src.indexOf(k) === i) : [];
+  Object.keys(CATS).forEach(k => { if (!order.includes(k)) order.push(k); });
+  _catSrc = src; _catOrder = order;
+  return order;
+}
+const catIdx = k => { const i = catKeys().indexOf(k); return i < 0 ? 999 : i; };
 const UNITS = ['г', 'мл', 'шт', 'пучок', 'упак'];
 const DOW = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
 const DOW_F = ['Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота', 'Воскресенье'];
@@ -470,7 +492,7 @@ function buildSeed() {
   SEED.dishes.forEach((d, i) => {
     dishes['d' + (i + 1)] = { n: d.n, e: d.e, m: d.m.split(''), r: parseIng(d.r), o: parseIng(d.o).map(g => g[0]), t: '', s: 2, cnt: 0, last: null };
   });
-  return { v: 1, products, dishes, pantry: {}, plan: {}, photos: {}, shop: { checked: {}, force: {}, extra: [] }, settings: { meals: ['b', 'l', 'd'] } };
+  return { v: 1, products, dishes, pantry: {}, plan: {}, photos: {}, shop: { checked: {}, force: {}, extra: [] }, settings: { meals: ['b', 'l', 'd'], dv: 2 } };
 }
 function migrate(st) {
   st.products = st.products || {}; st.dishes = st.dishes || {}; st.pantry = st.pantry || {}; st.plan = st.plan || {}; st.photos = st.photos || {};
@@ -693,6 +715,7 @@ async function initServer(localState) {
     S = migrate(localState);
     Object.assign(SYNC, { snap: meta.snap || {}, lastTs: meta.lastTs || 0, photoVers: meta.photoVers || {}, ready: true });
     await loadPhotos();
+    upgradeData();
     render(); push(); pull();
     return;
   }
@@ -718,6 +741,7 @@ async function initServer(localState) {
     SYNC.ready = true;
   }
   trackTs(rows);
+  upgradeData();
   persistLocal();
   await loadPhotos();
   render();
@@ -725,15 +749,24 @@ async function initServer(localState) {
   push();
 }
 
+/* Разовое обновление данных под новые отделы */
+function upgradeData() {
+  if (!S || !S.settings || (S.settings.dv || 0) >= 2) return;
+  if (S.products.egg && S.products.egg.c === 'dairy') S.products.egg = Object.assign({}, S.products.egg, { c: 'eggs' });
+  if (S.products.hon && S.products.hon.c === 'groc') S.products.hon = Object.assign({}, S.products.hon, { c: 'sweet' });
+  S.settings = Object.assign({}, S.settings, { dv: 2 });
+  save();
+}
+
 /* ================= Предметная логика ================= */
 const pname = id => S.products[id]?.n ?? '(удалён)';
 const punit = id => S.products[id]?.u ?? '';
-const catColor = id => CATS[S.products[id]?.c]?.c || CATS.other.c;
+const catColor = id => catOf(S.products[id]?.c).c;
 const atHome = id => !!S.pantry[id];
 const isHot = id => !!S.pantry[id]?.hot;
 const groupLabel = g => g.map(([p]) => pname(p)).join(' или ');
 const allPids = d => [...d.r.flat().map(o => o[0]), ...d.o.map(o => o[0])];
-function sortProducts(ids) { return ids.slice().sort((a, b) => (CAT_KEYS.indexOf(S.products[a].c) - CAT_KEYS.indexOf(S.products[b].c)) || pname(a).localeCompare(pname(b), 'ru')); }
+function sortProducts(ids) { return ids.slice().sort((a, b) => (catIdx(S.products[a].c) - catIdx(S.products[b].c)) || pname(a).localeCompare(pname(b), 'ru')); }
 function defQty(pid) { return ({ 'г': 100, 'мл': 100, 'шт': 1, 'пучок': 0.5, 'упак': 1 })[punit(pid)] ?? 1; }
 
 function analyze(d) {
@@ -784,7 +817,7 @@ function buildList(days) {
   }));
   const buy = [], home = [];
   Object.keys(agg).forEach(p => { const it = { p, q: agg[p], src: [...src[p]] }; (atHome(p) && !S.shop.force[p] ? home : buy).push(it); });
-  const ord = (a, b) => (CAT_KEYS.indexOf(S.products[a.p].c) - CAT_KEYS.indexOf(S.products[b.p].c)) || pname(a.p).localeCompare(pname(b.p), 'ru');
+  const ord = (a, b) => (catIdx(S.products[a.p].c) - catIdx(S.products[b.p].c)) || pname(a.p).localeCompare(pname(b.p), 'ru');
   return { buy: buy.sort(ord), home: home.sort(ord) };
 }
 
@@ -998,7 +1031,7 @@ function renderShop() {
     let cur = null, open = false;
     buy.forEach(it => {
       const c = S.products[it.p].c;
-      if (c !== cur) { if (open) h += `</div>`; h += `<div class="card list" style="margin-bottom:10px"><div class="list-h"><span class="dot" style="background:${CATS[c].c}"></span>${CATS[c].n}</div>`; cur = c; open = true; }
+      if (c !== cur) { if (open) h += `</div>`; h += `<div class="card list" style="margin-bottom:10px"><div class="list-h"><span class="dot" style="background:${catOf(c).c}"></span>${catOf(c).n}</div>`; cur = c; open = true; }
       h += shopRow(it, 'buy');
     });
     if (open) h += `</div>`;
@@ -1079,7 +1112,7 @@ function renderProductsView() {
   let cur = null;
   ids.forEach(p => {
     const c = S.products[p].c;
-    if (c !== cur) { if (cur) h += `</div>`; h += `<h2 class="sec">${CATS[c]?.n || 'Прочее'}</h2><div class="card list">`; cur = c; }
+    if (c !== cur) { if (cur) h += `</div>`; h += `<h2 class="sec">${catOf(c).n}</h2><div class="card list">`; cur = c; }
     h += `<div class="li tap" data-a="prod-edit" data-p="${p}" role="button" tabindex="0"><span class="dot" style="width:9px;height:9px;border-radius:50%;background:${catColor(p)}"></span><div class="grow">${esc(pname(p))}</div><span class="hint small">${punit(p)}${usage[p] ? `, в ${usage[p]} ${plural(usage[p], ['блюде', 'блюдах', 'блюдах'])}` : ''}</span></div>`;
   });
   if (cur) h += `</div>`;
@@ -1090,7 +1123,7 @@ function renderProductsView() {
 /* ---------- формы шторок ---------- */
 function productForm(f, saveAct, extra = '') {
   return `<label class="fld"><span>Название</span><input class="inp" data-i="form-name" value="${esc(f.n)}"></label>
-  <div class="fld"><span>Отдел магазина</span><div class="chips">${CAT_KEYS.map(c => `<button class="chip ${f.c === c ? 'on' : ''}" data-a="form-cat" data-c="${c}"><span class="dot" style="background:${CATS[c].c}"></span>${CATS[c].n}</button>`).join('')}</div></div>
+  <div class="fld"><span>Отдел магазина</span><div class="chips">${catKeys().map(c => `<button class="chip ${f.c === c ? 'on' : ''}" data-a="form-cat" data-c="${c}"><span class="dot" style="background:${CATS[c].c}"></span>${CATS[c].n}</button>`).join('')}</div></div>
   <div class="fld"><span>Единица</span><div class="chips">${UNITS.map(u => `<button class="chip ${f.u === u ? 'on' : ''}" data-a="form-unit" data-u="${u}">${u}</button>`).join('')}</div></div>
   <button class="btn block" data-a="${saveAct}">Сохранить</button>${extra}`;
 }
@@ -1102,7 +1135,7 @@ function productListBody(c, mode) {
   let cur = null;
   ids.forEach(p => {
     const cat = S.products[p].c;
-    if (cat !== cur) { if (cur) h += `</div>`; h += `<h2 class="sec" style="margin-top:14px">${CATS[cat]?.n || 'Прочее'}</h2><div class="chips">`; cur = cat; }
+    if (cat !== cur) { if (cur) h += `</div>`; h += `<h2 class="sec" style="margin-top:14px">${catOf(cat).n}</h2><div class="chips">`; cur = cat; }
     const on = mode === 'pantry' ? atHome(p) : false;
     h += `<button class="chip ${on ? 'on' : ''}" data-a="${mode === 'pantry' ? 'pantry-toggle' : 'pick-product'}" data-p="${p}"><span class="dot" style="background:${catColor(p)}"></span>${esc(pname(p))}</button>`;
   });
@@ -1224,7 +1257,7 @@ function openToMenu(id) {
 function openSettings() {
   openSheet(`<h3>Настройки</h3>
   <div class="fld"><span>Что планируем в меню</span><div class="chips">${MEAL_KEYS.map(m => `<button class="chip ${S.settings.meals.includes(m) ? 'on' : ''}" data-a="set-meal" data-m="${m}">${MEALS[m]}</button>`).join('')}</div></div>
-  <div class="fld"><span>Справочник</span><button class="btn soft block" data-a="open-products">Продукты и отделы магазина</button></div>
+  <div class="fld"><span>Справочник</span><button class="btn soft block" data-a="open-products">Продукты</button><button class="btn soft block" style="margin-top:8px" data-a="cat-order">Порядок отделов в магазине</button></div>
   <div class="fld"><span>Синхронизация</span><p class="small" style="margin:0 4px">${SERVER ? (SYNC.online ? '🟢 Общая база на сервере, связь есть.' : '🟠 Нет связи с сервером. Изменения сохранены на телефоне и отправятся позже.') : (API && !inTG ? 'Сервер настроен, но синхронизация работает только внутри Telegram.' : 'Локальный режим: база хранится только на этом устройстве.')}</p></div>
   <div class="fld"><span>Файлы</span><button class="btn soft block" data-a="import-merge">Добавить блюда из файла</button><div class="btn-row" style="margin-top:8px"><button class="btn soft" data-a="export">Сохранить копию</button><button class="btn soft" data-a="import">Заменить базу</button></div>
   <p class="hint small" style="margin:8px 4px 0">«Добавить блюда» дописывает новые блюда и фото к вашим, ничего не удаляя. «Заменить базу» полностью заменяет всё содержимым файла.</p></div>
@@ -1239,7 +1272,7 @@ function shopText() {
   let cur = null;
   buy.filter(it => !S.shop.checked[it.p]).forEach(it => {
     const c = S.products[it.p].c;
-    if (c !== cur) { lines.push('', CATS[c].n); cur = c; }
+    if (c !== cur) { lines.push('', catOf(c).n); cur = c; }
     lines.push(`• ${pname(it.p)}, ${fmtQ(it.q, punit(it.p), true)}`);
   });
   const ex = S.shop.extra.filter(x => !x.done);
@@ -1282,15 +1315,17 @@ async function mergeImport(file) {
   let data;
   try { data = JSON.parse(await file.text()); } catch (e) { return alertMsg('Не удалось прочитать файл. Нужен файл с базой блюд в формате JSON.'); }
   const st = data.state || data;
-  if (!st || !st.dishes) return alertMsg('В файле нет блюд.');
+  if (!st || (!st.dishes && !st.products)) return alertMsg('В файле нет ни блюд, ни продуктов.');
   toast('Добавляем блюда…');
   const byName = {};
   Object.keys(S.products).forEach(p => { byName[pname(p).toLowerCase()] = p; });
   const pidMap = {};
+  let pAdded = 0;
   for (const [pid, pr] of Object.entries(st.products || {})) {
     if (!pr || !pr.n) continue;
     const key = String(pr.n).trim().toLowerCase();
     if (byName[key]) { pidMap[pid] = byName[key]; continue; }
+    pAdded++;
     const nid = S.products[pid] ? uid('p') : pid;
     S.products[nid] = { n: key, c: CATS[pr.c] ? pr.c : 'other', u: UNITS.includes(pr.u) ? pr.u : 'г' };
     pidMap[pid] = nid; byName[key] = nid;
@@ -1298,7 +1333,7 @@ async function mergeImport(file) {
   const names = new Set(Object.values(S.dishes).map(d => d.n.trim().toLowerCase()));
   const mapOpt = o => (pidMap[o[0]] ? [pidMap[o[0]], Number(o[1]) || 0] : null);
   let added = 0, skipped = 0;
-  for (const [did, d] of Object.entries(st.dishes)) {
+  for (const [did, d] of Object.entries(st.dishes || {})) {
     if (!d || !d.n) continue;
     if (names.has(d.n.trim().toLowerCase())) { skipped++; continue; }
     const r = (d.r || []).map(g => g.map(mapOpt).filter(Boolean)).filter(g => g.length);
@@ -1312,7 +1347,11 @@ async function mergeImport(file) {
     added++;
   }
   closeSheet(true); save(); render();
-  alertMsg(`Добавлено блюд: ${added}.` + (skipped ? ` Пропущено, потому что уже есть: ${skipped}.` : ''));
+  const parts = [];
+  if (added || !pAdded) parts.push(`Добавлено блюд: ${added}.`);
+  if (pAdded) parts.push(`Новых продуктов в справочнике: ${pAdded}.`);
+  if (skipped) parts.push(`Блюд пропущено, потому что уже есть: ${skipped}.`);
+  alertMsg(parts.join(' '));
 }
 
 /* ================= Действия ================= */
@@ -1395,6 +1434,22 @@ const ACT = {
   'form-cat'(el) { sctx().form.c = el.dataset.c; refreshSheet(); },
   'form-unit'(el) { sctx().form.u = el.dataset.u; refreshSheet(); },
   'open-products'() { closeSheet(true); pushView({ type: 'products' }); },
+  'cat-order'() {
+    openSheetCtl({
+      kind: 'catorder',
+      head: () => `<h3>Порядок отделов</h3><p class="hint small" style="margin:-6px 2px 12px">В таком порядке пойдёт список покупок. Поставьте отделы так, как обходите магазин.</p>`,
+      body: () => `<div class="card list">${catKeys().map((k, i, a) => `<div class="li" style="min-height:48px;padding:6px 8px 6px 14px"><span class="dot" style="width:10px;height:10px;border-radius:50%;flex:none;background:${CATS[k].c}"></span><div class="grow">${CATS[k].n}</div><button class="x" data-a="cat-move" data-k="${k}" data-v="-1" ${i ? '' : 'disabled style="opacity:.25"'} aria-label="Выше">↑</button><button class="x" data-a="cat-move" data-k="${k}" data-v="1" ${i < a.length - 1 ? '' : 'disabled style="opacity:.25"'} aria-label="Ниже">↓</button></div>`).join('')}</div><button class="btn ghost block" style="margin-top:8px" data-a="cat-reset">Вернуть порядок по умолчанию</button>`,
+      onClose: () => render()
+    });
+  },
+  'cat-move'(el) {
+    const order = catKeys().slice(), i = order.indexOf(el.dataset.k), j = i + Number(el.dataset.v);
+    if (i < 0 || j < 0 || j >= order.length) return;
+    [order[i], order[j]] = [order[j], order[i]];
+    S.settings = Object.assign({}, S.settings, { catOrder: order });
+    save(); refreshSheet(); haptic('sel');
+  },
+  'cat-reset'() { const st = Object.assign({}, S.settings); delete st.catOrder; S.settings = st; save(); refreshSheet(); },
   'prod-edit'(el) { openProductEdit(el.dataset.p); },
   'prod-new'() { openProductEdit(null); },
   'pe-save'() {
@@ -1586,6 +1641,7 @@ async function init() {
     return;
   }
   S = st && st.dishes ? migrate(st) : buildSeed();
+  upgradeData();
   await loadPhotos();
   render();
   save();
