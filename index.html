@@ -5,6 +5,17 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no">
 <meta name="color-scheme" content="light dark">
 <title>Что готовим?</title>
+<script>
+/* ===================== НАСТРОЙКА =====================
+   Вставьте между кавычками адрес своего сервера Cloudflare,
+   например: https://chto-gotovim.ivan.workers.dev
+   Пока адрес пустой, приложение работает без сервера:
+   база хранится только на телефоне. */
+window.APP_CONFIG = {
+  API_URL: ''
+};
+/* ===================================================== */
+</script>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
 :root{
@@ -320,6 +331,9 @@ dishes: [
 const tg = window.Telegram && window.Telegram.WebApp;
 const inTG = !!(tg && tg.platform && tg.platform !== 'unknown');
 const ver = v => { try { return inTG && tg.isVersionAtLeast(v); } catch (e) { return false; } };
+const CFG = window.APP_CONFIG || {};
+const API = String(CFG.API_URL || '').trim().replace(/\/+$/, '');
+const SERVER = !!(API && inTG && tg.initData);
 function haptic(t) {
   if (!ver('6.1')) return;
   try {
@@ -436,10 +450,13 @@ let S;
 let saveT;
 function save() {
   clearTimeout(saveT);
-  saveT = setTimeout(() => {
-    if (DB.db) DB.set('kv', 'state', S);
-    else try { localStorage.setItem('chto-gotovim', JSON.stringify(S)); } catch (e) {}
-  }, 200);
+  saveT = setTimeout(() => { persistLocal(); if (SERVER) push(); }, 250);
+}
+function persistLocal() {
+  if (DB.db) {
+    DB.set('kv', 'state', S);
+    if (SERVER) DB.set('kv', 'sync', { api: API, snap: SYNC.snap, lastTs: SYNC.lastTs, photoVers: SYNC.photoVers });
+  } else try { localStorage.setItem('chto-gotovim', JSON.stringify(S)); } catch (e) {}
 }
 
 function parseIng(str) {
@@ -453,10 +470,10 @@ function buildSeed() {
   SEED.dishes.forEach((d, i) => {
     dishes['d' + (i + 1)] = { n: d.n, e: d.e, m: d.m.split(''), r: parseIng(d.r), o: parseIng(d.o).map(g => g[0]), t: '', s: 2, cnt: 0, last: null };
   });
-  return { v: 1, products, dishes, pantry: {}, plan: {}, shop: { checked: {}, force: {}, extra: [] }, settings: { meals: ['b', 'l', 'd'] } };
+  return { v: 1, products, dishes, pantry: {}, plan: {}, photos: {}, shop: { checked: {}, force: {}, extra: [] }, settings: { meals: ['b', 'l', 'd'] } };
 }
 function migrate(st) {
-  st.products = st.products || {}; st.dishes = st.dishes || {}; st.pantry = st.pantry || {}; st.plan = st.plan || {};
+  st.products = st.products || {}; st.dishes = st.dishes || {}; st.pantry = st.pantry || {}; st.plan = st.plan || {}; st.photos = st.photos || {};
   st.shop = Object.assign({ checked: {}, force: {}, extra: [] }, st.shop || {});
   st.settings = Object.assign({ meals: ['b', 'l', 'd'] }, st.settings || {});
   Object.values(st.dishes).forEach(d => { d.r = d.r || []; d.o = d.o || []; d.m = d.m || []; d.s = d.s || 2; d.t = d.t || ''; d.cnt = d.cnt || 0; });
@@ -473,20 +490,240 @@ async function loadPhotos() {
 function loadImg(file) {
   return new Promise((res, rej) => { const u = URL.createObjectURL(file); const i = new Image(); i.onload = () => { res(i); URL.revokeObjectURL(u); }; i.onerror = rej; i.src = u; });
 }
-async function compress(file, max = 1100) {
+async function compress(file, max = 1000) {
   const img = await loadImg(file);
   const k = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
   const c = document.createElement('canvas');
   c.width = Math.round(img.naturalWidth * k); c.height = Math.round(img.naturalHeight * k);
   c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
-  return new Promise(r => c.toBlob(b => r(b), 'image/jpeg', 0.82));
+  return new Promise(r => c.toBlob(b => r(b), 'image/jpeg', 0.8));
 }
 async function savePhoto(id, blob) {
+  if (SERVER) {
+    const r = await api('/api/photo/' + encodeURIComponent(id), { method: 'PUT', body: blob, headers: { 'Content-Type': blob.type || 'image/jpeg' } });
+    S.photos[id] = { v: r.v }; setSnap('g:' + id, JSON.stringify(S.photos[id])); SYNC.photoVers[id] = r.v;
+  }
   await DB.set('photos', id, blob);
   if (photoURL[id]) URL.revokeObjectURL(photoURL[id]);
   photoURL[id] = URL.createObjectURL(blob);
 }
-async function dropPhoto(id) { await DB.del('photos', id); if (photoURL[id]) { URL.revokeObjectURL(photoURL[id]); delete photoURL[id]; } }
+async function trySavePhoto(id, blob) {
+  try { await savePhoto(id, blob); return true; }
+  catch (e) { alertMsg('Фото не сохранилось: нет связи с сервером. Попробуйте ещё раз позже.'); return false; }
+}
+async function dropPhoto(id) {
+  if (SERVER) { try { await api('/api/photo/' + encodeURIComponent(id), { method: 'DELETE' }); } catch (e) {} delete S.photos[id]; setSnap('g:' + id, null); delete SYNC.photoVers[id]; }
+  await DB.del('photos', id); if (photoURL[id]) { URL.revokeObjectURL(photoURL[id]); delete photoURL[id]; } }
+
+/* ================= Синхронизация с сервером ================= */
+const SYNC = { snap: {}, lastTs: 0, photoVers: {}, ready: false, pushing: false, again: false, pulling: false, online: true, blocked: false, hold: false };
+
+async function api(path, opt = {}) {
+  const headers = Object.assign({ 'X-Init-Data': tg.initData }, opt.headers || {});
+  let body = opt.body;
+  if (opt.json !== undefined) { headers['Content-Type'] = 'application/json'; body = JSON.stringify(opt.json); }
+  const r = await fetch(API + path, { method: opt.method || 'GET', headers, body });
+  const ct = r.headers.get('content-type') || '';
+  if (!r.ok) {
+    let data = null;
+    if (ct.includes('json')) try { data = await r.json(); } catch (e) {}
+    const err = new Error((data && data.error) || 'HTTP ' + r.status); err.status = r.status; err.data = data;
+    throw err;
+  }
+  return ct.includes('json') ? r.json() : r;
+}
+function emptyState() { return { v: 1, products: {}, dishes: {}, pantry: {}, plan: {}, photos: {}, shop: { checked: {}, force: {}, extra: [] }, settings: null }; }
+
+// Состояние раскладывается на маленькие записи: каждое блюдо, продукт, день меню, отметка в списке — отдельно.
+// Так двое могут менять разное одновременно, не мешая друг другу.
+function records(st) {
+  const out = {};
+  const put = (k, obj) => { for (const id in obj) out[k + ':' + id] = obj[id]; };
+  put('p', st.products); put('d', st.dishes); put('h', st.pantry); put('g', st.photos || {});
+  for (const k in st.plan) { const day = st.plan[k]; if (day && Object.values(day).some(a => a && a.length)) out['m:' + k] = day; }
+  for (const p in st.shop.checked) if (st.shop.checked[p]) out['c:' + p] = 1;
+  for (const p in st.shop.force) if (st.shop.force[p]) out['f:' + p] = 1;
+  st.shop.extra.forEach(x => { out['x:' + x.id] = x; });
+  if (st.settings) out['s:main'] = st.settings;
+  return out;
+}
+function setRecord(kind, id, v) {
+  const del = v === undefined;
+  const on = (obj, val) => { if (del) delete obj[id]; else obj[id] = val; };
+  switch (kind) {
+    case 'p': on(S.products, v); break;
+    case 'd': on(S.dishes, v); break;
+    case 'h': on(S.pantry, v); break;
+    case 'g': on(S.photos, v); break;
+    case 'm': on(S.plan, v); break;
+    case 'c': on(S.shop.checked, true); break;
+    case 'f': on(S.shop.force, true); break;
+    case 'x': {
+      const i = S.shop.extra.findIndex(x => x.id === id);
+      if (del) { if (i >= 0) S.shop.extra.splice(i, 1); } else if (i >= 0) S.shop.extra[i] = v; else S.shop.extra.push(v);
+      break;
+    }
+    case 's': if (!del) S.settings = v; break;
+  }
+}
+function setSnap(k, j) { if (j === null) delete SYNC.snap[k]; else SYNC.snap[k] = j; }
+function diffChanges() {
+  const rec = records(S), ch = [];
+  for (const k in rec) { const j = JSON.stringify(rec[k]); if (SYNC.snap[k] !== j) ch.push([k, j]); }
+  for (const k in SYNC.snap) if (!(k in rec)) ch.push([k, null]);
+  return ch;
+}
+async function push() {
+  if (!SERVER || !SYNC.ready || SYNC.blocked || SYNC.hold) return;
+  if (SYNC.pushing) { SYNC.again = true; return; }
+  const ch = diffChanges();
+  if (!ch.length) return;
+  SYNC.pushing = true;
+  try {
+    for (let i = 0; i < ch.length; i += 300) {
+      const part = ch.slice(i, i + 300);
+      await api('/api/sync', { method: 'POST', json: { changes: part.map(([k, j]) => { const c = k.indexOf(':'); return { k: k.slice(0, c), id: k.slice(c + 1), d: j }; }) } });
+      part.forEach(([k, j]) => setSnap(k, j));
+    }
+    netState(true);
+    persistLocal();
+  } catch (e) { netState(false, e); }
+  finally { SYNC.pushing = false; if (SYNC.again) { SYNC.again = false; push(); } }
+}
+function applyRows(rows) {
+  if (!rows.length) return false;
+  const rec = records(S);
+  let changed = false;
+  for (const r of rows) {
+    const key = r.kind + ':' + r.id;
+    const serverJ = r.deleted ? null : r.data;
+    const localJ = key in rec ? JSON.stringify(rec[key]) : null;
+    const snapJ = key in SYNC.snap ? SYNC.snap[key] : null;
+    if (localJ !== snapJ) { if (localJ === serverJ) setSnap(key, serverJ); continue; } // своя правка ещё не отправлена
+    if (serverJ === localJ) { setSnap(key, serverJ); continue; }
+    let v;
+    if (serverJ !== null) { try { v = JSON.parse(serverJ); } catch (e) { continue; } }
+    setRecord(r.kind, r.id, v);
+    setSnap(key, serverJ);
+    changed = true;
+  }
+  return changed;
+}
+async function fetchRows(since) {
+  const all = [];
+  for (let guard = 0; guard < 50; guard++) {
+    const r = await api('/api/sync?since=' + since);
+    all.push(...r.rows);
+    if (r.rows.length < 5000) break;
+    since = r.rows[r.rows.length - 1].updated_at - 1;
+  }
+  return all;
+}
+function trackTs(rows) { for (const x of rows) if (x.updated_at > SYNC.lastTs) SYNC.lastTs = x.updated_at; }
+async function pull() {
+  if (!SERVER || !SYNC.ready || SYNC.blocked || SYNC.pulling) return;
+  SYNC.pulling = true;
+  try {
+    const rows = await fetchRows(Math.max(0, SYNC.lastTs - 5000));
+    const changed = applyRows(rows);
+    trackTs(rows);
+    netState(true);
+    const ph = await syncPhotos();
+    if (rows.length || ph) persistLocal();
+    if (changed || ph) softRender();
+  } catch (e) { netState(false, e); }
+  finally { SYNC.pulling = false; }
+}
+async function syncPhotos() {
+  let changed = false;
+  for (const id of Object.keys(SYNC.photoVers)) {
+    if (S.photos[id]) continue;
+    delete SYNC.photoVers[id]; await DB.del('photos', id);
+    if (photoURL[id]) { URL.revokeObjectURL(photoURL[id]); delete photoURL[id]; }
+    changed = true;
+  }
+  for (const [id, meta] of Object.entries(S.photos)) {
+    if (!meta || SYNC.photoVers[id] === meta.v) continue;
+    try {
+      const r = await api('/api/photo/' + encodeURIComponent(id));
+      const b = await r.blob();
+      await DB.set('photos', id, b);
+      if (photoURL[id]) URL.revokeObjectURL(photoURL[id]);
+      photoURL[id] = URL.createObjectURL(b);
+      SYNC.photoVers[id] = meta.v; changed = true;
+    } catch (e) { if (e.status === 404) SYNC.photoVers[id] = meta.v; else break; }
+  }
+  return changed;
+}
+function netState(ok, err) {
+  if (err && (err.status === 401 || err.status === 403)) { showAccessError(err); return; }
+  if (ok !== SYNC.online) { SYNC.online = ok; toast(ok ? 'Связь с сервером восстановлена' : 'Нет связи с сервером. Изменения отправятся позже'); }
+}
+let pendingRender = false;
+function softRender() {
+  const a = document.activeElement;
+  if (a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA')) { pendingRender = true; return; }
+  render(); refreshSheet();
+}
+document.addEventListener('focusout', () => { if (pendingRender) { pendingRender = false; setTimeout(() => { render(); refreshSheet(); }, 60); } });
+
+function lockScreen(icon, title, html) {
+  SYNC.blocked = true;
+  UI.views = []; closeSheet(true); renderViews(); updateChrome();
+  $('#tabs').style.display = 'none';
+  $('#screen').innerHTML = `<div class="empty" style="padding-top:14vh"><div style="font-size:52px">${icon}</div><h2 style="color:var(--text);margin:12px 0 10px;font-size:22px">${title}</h2>${html}</div>`;
+}
+function showAccessError(err) {
+  if (err.status === 403) {
+    const id = esc(err.data && err.data.id);
+    lockScreen('🔒', 'Нужен доступ', `<p>Добавьте этот номер в переменную ALLOWED_IDS на сервере Cloudflare, затем закройте и снова откройте приложение.</p><p style="font-size:28px;font-weight:700;color:var(--text);margin:20px 0 8px;user-select:all">${id}</p><button class="btn" data-a="copy-id" data-id="${id}">Скопировать номер</button>`);
+  } else {
+    lockScreen('🔑', 'Не удалось войти', `<p>Закройте приложение и откройте его снова кнопкой в чате с ботом. Если не помогает, проверьте секрет BOT_TOKEN в настройках сервера: это должен быть токен именно этого бота.</p>`);
+  }
+}
+function showLoadError(e) {
+  const hint = e && e.status === 500 && e.data ? `<p class="small">Сервер ответил: ${esc(e.data.error)}${e.data.message ? ' — ' + esc(e.data.message) : ''}</p>` : '<p class="small">Проверьте интернет и адрес сервера в начале файла index.html.</p>';
+  lockScreen('📡', 'Сервер не отвечает', `<p>Не получилось загрузить общую базу.</p>${hint}<button class="btn" style="margin-top:14px" data-a="reload">Попробовать снова</button>`);
+}
+
+async function initServer(localState) {
+  const meta = await DB.get('kv', 'sync');
+  if (meta && meta.api === API && localState && localState.dishes) {
+    // быстрый старт из кэша, потом догружаем свежее
+    S = migrate(localState);
+    Object.assign(SYNC, { snap: meta.snap || {}, lastTs: meta.lastTs || 0, photoVers: meta.photoVers || {}, ready: true });
+    await loadPhotos();
+    render(); push(); pull();
+    return;
+  }
+  $('#screen').innerHTML = '<div class="empty" style="padding-top:30vh">Загружаем общую базу…</div>';
+  let rows;
+  try { rows = await fetchRows(0); }
+  catch (e) { if (e.status === 401 || e.status === 403) showAccessError(e); else showLoadError(e); return; }
+  if (!rows.length) {
+    // Сервер пустой: переносим базу с этого телефона (или исходную)
+    S = localState && localState.dishes ? migrate(localState) : buildSeed();
+    S.photos = {};
+    SYNC.snap = {}; SYNC.photoVers = {}; SYNC.ready = true;
+    await push();
+    for (const [id, b] of await DB.entries('photos')) { if (b && S.dishes[id]) { try { await savePhoto(id, b); } catch (e) {} } }
+    toast('База перенесена на сервер');
+  } else {
+    S = emptyState();
+    SYNC.snap = {}; SYNC.photoVers = {};
+    await DB.clear('photos');
+    applyRows(rows);
+    trackTs(rows);
+    if (!S.settings) S.settings = { meals: ['b', 'l', 'd'] };
+    SYNC.ready = true;
+  }
+  trackTs(rows);
+  persistLocal();
+  await loadPhotos();
+  render();
+  if (await syncPhotos()) { persistLocal(); softRender(); }
+  push();
+}
 
 /* ================= Предметная логика ================= */
 const pname = id => S.products[id]?.n ?? '(удалён)';
@@ -988,8 +1225,9 @@ function openSettings() {
   openSheet(`<h3>Настройки</h3>
   <div class="fld"><span>Что планируем в меню</span><div class="chips">${MEAL_KEYS.map(m => `<button class="chip ${S.settings.meals.includes(m) ? 'on' : ''}" data-a="set-meal" data-m="${m}">${MEALS[m]}</button>`).join('')}</div></div>
   <div class="fld"><span>Справочник</span><button class="btn soft block" data-a="open-products">Продукты и отделы магазина</button></div>
-  <div class="fld"><span>Резервная копия</span><div class="btn-row"><button class="btn soft" data-a="export">Сохранить в файл</button><button class="btn soft" data-a="import">Загрузить из файла</button></div>
-  <p class="hint small" style="margin:8px 4px 0">Через файл можно перенести базу на телефон девушки. Общая синхронизация появится вместе с сервером.</p></div>
+  <div class="fld"><span>Синхронизация</span><p class="small" style="margin:0 4px">${SERVER ? (SYNC.online ? '🟢 Общая база на сервере, связь есть.' : '🟠 Нет связи с сервером. Изменения сохранены на телефоне и отправятся позже.') : (API && !inTG ? 'Сервер настроен, но синхронизация работает только внутри Telegram.' : 'Локальный режим: база хранится только на этом устройстве.')}</p></div>
+  <div class="fld"><span>Файлы</span><button class="btn soft block" data-a="import-merge">Добавить блюда из файла</button><div class="btn-row" style="margin-top:8px"><button class="btn soft" data-a="export">Сохранить копию</button><button class="btn soft" data-a="import">Заменить базу</button></div>
+  <p class="hint small" style="margin:8px 4px 0">«Добавить блюда» дописывает новые блюда и фото к вашим, ничего не удаляя. «Заменить базу» полностью заменяет всё содержимым файла.</p></div>
   <button class="btn danger block" data-a="reset">Вернуть исходную базу</button>`, { onClose: () => render() });
 }
 
@@ -1027,12 +1265,54 @@ async function importData(file) {
   try { data = JSON.parse(await file.text()); } catch (e) { return alertMsg('Не удалось прочитать файл. Нужен файл, сохранённый из этого приложения.'); }
   const st = data.state || data;
   if (!st || !st.products || !st.dishes) return alertMsg('В файле нет базы блюд. Нужен файл, сохранённый из этого приложения.');
-  if (!(await confirmAsk('Заменить текущую базу данными из файла?'))) return;
-  S = migrate(st);
-  await DB.clear('photos');
-  for (const [k, u] of Object.entries(data.photos || {})) { try { await DB.set('photos', k, dataURLToBlob(u)); } catch (e) {} }
+  if (!(await confirmAsk(SERVER ? 'Заменить общую базу данными из файла? Изменится у вас обоих.' : 'Заменить текущую базу данными из файла?'))) return;
+  SYNC.hold = true;
+  toast('Загружаем…');
+  S = migrate(st); S.photos = {};
+  await DB.clear('photos'); SYNC.photoVers = {};
+  for (const [k, u] of Object.entries(data.photos || {})) {
+    if (!S.dishes[k]) continue;
+    try { if (SERVER) await savePhoto(k, dataURLToBlob(u)); else await DB.set('photos', k, dataURLToBlob(u)); } catch (e) {}
+  }
+  SYNC.hold = false;
   await loadPhotos();
   UI.views = []; closeSheet(true); save(); render(); toast('База загружена');
+}
+async function mergeImport(file) {
+  let data;
+  try { data = JSON.parse(await file.text()); } catch (e) { return alertMsg('Не удалось прочитать файл. Нужен файл с базой блюд в формате JSON.'); }
+  const st = data.state || data;
+  if (!st || !st.dishes) return alertMsg('В файле нет блюд.');
+  toast('Добавляем блюда…');
+  const byName = {};
+  Object.keys(S.products).forEach(p => { byName[pname(p).toLowerCase()] = p; });
+  const pidMap = {};
+  for (const [pid, pr] of Object.entries(st.products || {})) {
+    if (!pr || !pr.n) continue;
+    const key = String(pr.n).trim().toLowerCase();
+    if (byName[key]) { pidMap[pid] = byName[key]; continue; }
+    const nid = S.products[pid] ? uid('p') : pid;
+    S.products[nid] = { n: key, c: CATS[pr.c] ? pr.c : 'other', u: UNITS.includes(pr.u) ? pr.u : 'г' };
+    pidMap[pid] = nid; byName[key] = nid;
+  }
+  const names = new Set(Object.values(S.dishes).map(d => d.n.trim().toLowerCase()));
+  const mapOpt = o => (pidMap[o[0]] ? [pidMap[o[0]], Number(o[1]) || 0] : null);
+  let added = 0, skipped = 0;
+  for (const [did, d] of Object.entries(st.dishes)) {
+    if (!d || !d.n) continue;
+    if (names.has(d.n.trim().toLowerCase())) { skipped++; continue; }
+    const r = (d.r || []).map(g => g.map(mapOpt).filter(Boolean)).filter(g => g.length);
+    const o = (d.o || []).map(mapOpt).filter(Boolean);
+    const m = (d.m || []).filter(x => MEAL_KEYS.includes(x));
+    const nid = uid('d');
+    S.dishes[nid] = { n: d.n.trim(), e: d.e || '🍽️', m: m.length ? m : ['l', 'd'], r, o, t: d.t || '', s: d.s || 2, cnt: 0, last: null };
+    names.add(d.n.trim().toLowerCase());
+    const ph = data.photos && data.photos[did];
+    if (ph) { try { await savePhoto(nid, dataURLToBlob(ph)); } catch (e) {} }
+    added++;
+  }
+  closeSheet(true); save(); render();
+  alertMsg(`Добавлено блюд: ${added}.` + (skipped ? ` Пропущено, потому что уже есть: ${skipped}.` : ''));
 }
 
 /* ================= Действия ================= */
@@ -1187,7 +1467,7 @@ const ACT = {
   'shop-share'() {
     const { title, body } = shopText();
     if (!body) return toast('Список пуст');
-    openSheet(`<h3>Список покупок</h3><div class="card notes" style="max-height:40vh;overflow:auto;font-size:14px">${esc(title + '\n\n' + body)}</div><div style="height:12px"></div><button class="btn block" data-a="share-tg">Отправить в чат</button><button class="btn soft block" data-a="share-copy">Скопировать</button>`);
+    openSheet(`<h3>Список покупок</h3><div class="card notes" style="max-height:40vh;overflow:auto;font-size:14px">${esc(title + '\n\n' + body)}</div><div style="height:12px"></div>${SERVER ? '<button class="btn block" data-a="share-bot">Прислать нам обоим в бот</button>' : ''}<button class="btn ${SERVER ? 'soft ' : ''}block" data-a="share-tg">Отправить в чат</button><button class="btn soft block" data-a="share-copy">Скопировать</button>`);
   },
   'share-tg'() {
     const { title, body } = shopText();
@@ -1205,10 +1485,22 @@ const ACT = {
   settings() { openSettings(); },
   'set-meal'(el) { const m = el.dataset.m; S.settings.meals = S.settings.meals.includes(m) ? S.settings.meals.filter(x => x !== m) : MEAL_KEYS.filter(x => x === m || S.settings.meals.includes(x)); save(); el.classList.toggle('on'); },
   export() { exportData(); },
-  import() { $('#file-import').click(); },
+  import() { UI.importMode = 'replace'; $('#file-import').click(); },
+  'import-merge'() { UI.importMode = 'merge'; $('#file-import').click(); },
+  'copy-id'(el) { const t = el.dataset.id; (navigator.clipboard ? navigator.clipboard.writeText(t) : Promise.reject()).then(() => toast('Номер скопирован'), () => toast('Выделите номер и скопируйте вручную')); },
+  reload() { location.reload(); },
+  async 'share-bot'() {
+    const { title, body } = shopText();
+    try {
+      const r = await api('/api/notify', { method: 'POST', json: { text: title + '\n\n' + body } });
+      closeSheet();
+      if (r.sent) toast(`Отправлено в чат с ботом: ${r.sent} из ${r.total}`);
+      else alertMsg('Бот не смог отправить сообщение. Откройте чат с ботом и нажмите Start.');
+    } catch (e) { alertMsg('Не удалось отправить: нет связи с сервером.'); }
+  },
   async reset() {
-    if (!(await confirmAsk('Вернуть исходную базу? Ваши правки, меню, холодильник и фото будут удалены.'))) return;
-    S = buildSeed(); await DB.clear('photos'); await loadPhotos(); UI.views = []; closeSheet(true); save(); render(); toast('Исходная база восстановлена');
+    if (!(await confirmAsk(SERVER ? 'Вернуть исходную базу? Правки, меню, холодильник и фото удалятся у вас обоих.' : 'Вернуть исходную базу? Ваши правки, меню, холодильник и фото будут удалены.'))) return;
+    S = buildSeed(); SYNC.photoVers = {}; await DB.clear('photos'); await loadPhotos(); UI.views = []; closeSheet(true); save(); render(); toast('Исходная база восстановлена');
   }
 };
 
@@ -1238,7 +1530,7 @@ async function saveDraft() {
   if (!d.r.length) return alertMsg('Добавьте хотя бы один обязательный продукт');
   const id = v.id || uid('d');
   S.dishes[id] = Object.assign({ cnt: 0, last: null }, S.dishes[id] || {}, d);
-  if (v.photo) await savePhoto(id, v.photo);
+  if (v.photo) await trySavePhoto(id, v.photo);
   if (v.photoURL) URL.revokeObjectURL(v.photoURL);
   save();
   UI.views.pop();
@@ -1267,9 +1559,9 @@ document.addEventListener('change', async e => {
     try { blob = await compress(f); } catch (err) { return alertMsg('Не получилось открыть фото. Попробуйте другое изображение.'); }
     const t = UI.photoTarget; UI.photoTarget = null;
     if (t && t.editor) { const v = topView(); if (v.photoURL) URL.revokeObjectURL(v.photoURL); v.photo = blob; v.photoURL = URL.createObjectURL(blob); renderViews(); }
-    else if (t && t.dish) { await savePhoto(t.dish, blob); render(); toast('Фото сохранено'); }
+    else if (t && t.dish) { if (await trySavePhoto(t.dish, blob)) { render(); toast('Фото сохранено'); } }
   }
-  if (e.target.id === 'file-import') { const f = e.target.files[0]; e.target.value = ''; if (f) { closeSheet(true); importData(f); } }
+  if (e.target.id === 'file-import') { const f = e.target.files[0]; e.target.value = ''; if (f) { closeSheet(true); if (UI.importMode === 'merge') mergeImport(f); else importData(f); } }
 });
 $('#fallback-main').addEventListener('click', () => mainHandler && mainHandler());
 
@@ -1286,9 +1578,15 @@ async function init() {
   await DB.open();
   let st = await DB.get('kv', 'state');
   if (!st) { try { st = JSON.parse(localStorage.getItem('chto-gotovim') || 'null'); } catch (e) {} }
+  UI.homeMeal = mealByTime();
+  if (SERVER) {
+    await initServer(st);
+    setInterval(() => { if (document.visibilityState === 'visible') { push(); pull(); } }, CFG.POLL_MS || 8000);
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') pull(); });
+    return;
+  }
   S = st && st.dishes ? migrate(st) : buildSeed();
   await loadPhotos();
-  UI.homeMeal = mealByTime();
   render();
   save();
 }
